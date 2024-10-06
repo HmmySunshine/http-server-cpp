@@ -5,38 +5,133 @@
 #include <tuple>
 #include <vector>
 #include <sstream>
+#include <map>
+#include "requestparse.h"
 #pragma comment(lib,"ws2_32.lib")
 
 
+//User-Agent: PostmanRuntime/7.42.0
+//Accept: "*/*"
+//Cache - Control: no - cache
+//Postman - Token : d93b3b5c - b02a - 4048 - b104 - 858edbdfcf27
+//Host : localhost:4221
+//Accept - Encoding : gzip, deflate, br
+//Connection : keep - alive
 
-std::vector<std::string> SplitMessage(const std::string& message, const std::string& delim)
-{
-	std::vector<std::string> tokens;
-	std::stringstream ss = std::stringstream{ message };
-	std::string line;
-	while (std::getline(ss, line, *delim.begin()))
+struct HttpRequest : public RequestParse {
+	std::string method;
+	std::string path;
+	std::string version;
+	std::map<std::string, std::string> headers;
+	std::string body;
+public:
+	
+	void InitHttpRequest(const std::string& requset)
 	{
-		tokens.push_back(line);
-		//"\r\n" 遇到\就忽略后面3个不读了
-		//delim.length() - 1 的类型是 size_t，size_t 类型是无符号整数，而 std::streamsize 是有符号整数。
-		//将 size_t 类型的值赋值给 std::streamsize 类型的变量时，会触发类型转换，导致溢出
-		ss.ignore(static_cast<std::streamsize>(delim.length() - 1));
+		auto [path, tokens] = getPath(requset);
+		if (!tokens.empty())
+		{
+			std::vector<std::string> paths = SplitMessage(tokens[0], " ");
+			//Get /path HTTP/1.1
+
+			if (paths.size() >= 3)
+			{
+				this->method = paths[0];
+				this->path = path;
+				this->version = paths[2];
+			}
+			else
+			{
+				std::cerr << "Request is not valid" << std::endl;
+
+			}
+		}
 		
+		//User-Agent: PostmanRuntime/7.42.0
+		//key: value
+		//第一个元素是get 路径 然后协议所以不需要
+		for (size_t i = 1; i < tokens.size(); i++)
+		{
+			std::vector<std::string> header = SplitMessage(tokens[i], ": ");
+			if (header.size() == 2)
+			{
+				headers[header[0]] = header[1];
+			}
+			else
+			{
+                std::clog << "Header is not valid" << std::endl;
+			}
+		}
+		std::vector<std::string> bodyTokens = SplitMessage(path, "/");
+		// /echo/abc  只需要abc
+		body = bodyTokens.back();
 	}
-	return tokens;
-}
 
-std::tuple<std::string, std::vector<std::string>> GetPath(const std::string& request)
-{
-	std::vector<std::string> tokens = SplitMessage(request, "\r\n");
-	std::vector<std::string> paths = SplitMessage(tokens[0], " ");
-	return { paths[1], tokens };
-}
+private:
+	std::tuple<std::string, std::vector<std::string>> getPath(const std::string& request) override
+	{
+		std::vector<std::string> tokens = SplitMessage(request, "\r\n");
+		std::vector<std::string> paths = SplitMessage(tokens[0], " ");
+		//返回的是完整路径比如/echo/abc 
+		//一个返回的是字符串数据根据换号符分割的字符串数组
+		this->requestMesssage = { paths[1], tokens };
+		return requestMesssage;
+	}
+	//分割字符串
+	std::vector<std::string> SplitMessage(const std::string& message, const std::string& delim) override
+	{
+		if (delim.empty())
+		{
+			std::clog << "Delim is empty" << std::endl;
+            return {};
+		}
+		std::vector<std::string> tokens;
+		std::stringstream ss = std::stringstream{ message };
+		std::string line;
+		//寻找更好的处理方式
+		if (message.starts_with("Host"))
+		{
+			tokens.emplace_back("Host");
+			tokens.emplace_back(message.substr(6));
+            return tokens;
+		}
+		while (std::getline(ss, line, *delim.begin()))
+		{
+			tokens.push_back(line);
+			//"\r\n" 遇到\就忽略后面3个不读了
+			//delim.length() - 1 的类型是 size_t，size_t 类型是无符号整数，而 std::streamsize 是有符号整数。
+			//将 size_t 类型的值赋值给 std::streamsize 类型的变量时，会触发类型转换，导致溢出
+			
+			ss.ignore(static_cast<std::streamsize>(delim.length() - 1));
 
-std::string GetResponse(size_t contentLength, const std::string& content)
-{
-    return "HTTP/1.1 200 OK\r\nContent-Type: TEXT/plain\r\nContent-Length:" + std::to_string(contentLength) + "\r\n\r\n" + content;
-}
+		}
+		return tokens;
+	}
+};
+
+struct HttpResponse {
+	std::string status;
+	std::string contentType;
+	std::tuple<std::string, size_t> contentLength;
+	std::string body;
+
+
+public:
+	std::string GetResponse()
+	{
+		auto[ctlString, contentLength] = getContentLength();
+		return status + contentType + ctlString + std::to_string(contentLength) + "\r\n\r\n" + body;
+
+	}
+private:
+	std::tuple<std::string, size_t> getContentLength() 
+	{
+		return contentLength;
+	}
+
+};
+
+
 
 
 int main(int argc, char* argv[])
@@ -122,24 +217,31 @@ int main(int argc, char* argv[])
 		std::clog << "Client Message (length: " << clientMessage.size() << ")" << std::endl;
 		std::clog << clientMessage << std::endl;
 		//结构化绑定
-		auto[path, requestData] = GetPath(clientMessage);
-		auto paths = SplitMessage(path, "/");
+		HttpRequest httpRequest;
+		httpRequest.InitHttpRequest(clientMessage);
+
 		std::string response;
+
+		std::string testResponse("Hello World!");
+
+		HttpResponse httpResponse{ "HTTP/1.1 200 OK\r\n", "Content-Type: TEXT/plain\r\n",
+			{"Content-Length:", testResponse.length()}, testResponse};
+			
 		try
 		{
-			if (path == "/")
+			if (httpRequest.path == "/")
 			{
-				response = "HTTP/1.1 200 OK\r\n";
+				response = httpResponse.GetResponse();
 			}
-			else if (paths[1] == "echo")
+			else if (httpRequest.path == "/echo/abc")
 			{
-				response = GetResponse(paths[1].size(), paths[1]);
+				response = httpResponse.GetResponse();
 				
 			}
-			else if (paths[1] == "user-agent")
+			else if (httpRequest.path == "/user-agent")
 			{
 
-				std::string userAgent = requestData[1].substr(12);
+				std::string userAgent = httpRequest.headers["User-Agent"];
 				response = "HTTP/1.1 200 OK\r\nContent-Type: TEXT/plain\r\nContent-Length:"
 					+ std::to_string(userAgent.size()) + "\r\n\r\n" + userAgent;
 
