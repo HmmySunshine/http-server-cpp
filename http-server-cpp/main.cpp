@@ -50,7 +50,8 @@ public:
 		//User-Agent: PostmanRuntime/7.42.0
 		//key: value
 		//第一个元素是get 路径 然后协议所以不需要
-		for (size_t i = 1; i < tokens.size(); i++)
+		this->headers = std::move(getHeaders(tokens));
+		/*for (size_t i = 1; i < tokens.size(); i++)
 		{
 			std::vector<std::string> header = SplitMessage(tokens[i], ": ");
 			if (header.size() == 2)
@@ -61,13 +62,52 @@ public:
 			{
                 std::clog << "Header is not valid" << std::endl;
 			}
-		}
+		}*/
 		std::vector<std::string> bodyTokens = SplitMessage(path, "/");
 		// /echo/abc  只需要abc
 		body = bodyTokens.back();
 	}
 
 private:
+	std::map<std::string, std::string> getHeaders(const std::vector<std::string>& headerlines)
+	{
+		std::map<std::string, std::string> headers;
+		for (const auto& line : headerlines)
+		{
+			if (line.empty())
+			{
+				std::clog << "请求头内容为空" << std::endl;
+				continue;
+			}
+			size_t delimPos = line.find(": ");
+			if (delimPos != std::string::npos)
+			{
+				std::string key = line.substr(0, delimPos);
+				//Host: localhost:4221
+				std::string value = line.substr(delimPos + 2);
+				if (!value.empty() && value.back() == '\n')
+				{
+                    value.pop_back();
+				}
+
+				if (!value.empty() && value.back() == '\r')
+				{
+					value.pop_back();
+				}
+				headers[key] = value;
+			}
+			else
+			{
+				if (!line.empty())
+				{
+					std::cout << "请求头内容可能是空内容" << std::endl;
+				}
+			}
+		}
+		return headers;
+	}
+
+
 	std::tuple<std::string, std::vector<std::string>> getPath(const std::string& request) override
 	{
 		std::vector<std::string> tokens = SplitMessage(request, "\r\n");
@@ -107,6 +147,7 @@ private:
 		}
 		return tokens;
 	}
+
 };
 
 struct HttpResponse {
@@ -114,7 +155,16 @@ struct HttpResponse {
 	std::string contentType;
 	std::tuple<std::string, size_t> contentLength;
 	std::string body;
-
+public:
+	HttpResponse(std::string status, std::string contentType, std::tuple<std::string, size_t> contentLength, std::string body)
+		: status(std::move(status)), contentType(std::move(contentType)), contentLength(std::move(contentLength)), body(std::move(body))
+	{
+		// 确保在构造函数中就完成初始化
+		auto [ctlString, len] = this->contentLength;
+		if (len == 0) {
+			std::cerr << "Warning: Content-Length is 0!" << std::endl;
+		}
+	}
 
 public:
 	std::string GetResponse()
@@ -214,6 +264,9 @@ int main(int argc, char* argv[])
 	}
 	else
 	{
+		//调整字符串大小
+        clientMessage.resize(brecvd);
+
 		std::clog << "Client Message (length: " << clientMessage.size() << ")" << std::endl;
 		std::clog << clientMessage << std::endl;
 		//结构化绑定
@@ -222,35 +275,45 @@ int main(int argc, char* argv[])
 
 		std::string response;
 
-		std::string testResponse("Hello World!");
-
+		std::string testResponse("\r\n\r\n1");
+		//std::string t2 = httpRequest.body;
 		HttpResponse httpResponse{ "HTTP/1.1 200 OK\r\n", "Content-Type: TEXT/plain\r\n",
 			{"Content-Length:", testResponse.length()}, testResponse};
-			
+
+
 		try
 		{
-			if (httpRequest.path == "/")
+			if (httpRequest.method == "GET")
 			{
-				response = httpResponse.GetResponse();
-			}
-			else if (httpRequest.path == "/echo/abc")
-			{
-				response = httpResponse.GetResponse();
-				
-			}
-			else if (httpRequest.path == "/user-agent")
-			{
+				if (httpRequest.path == "/")
+				{
+					httpResponse = { "HTTP/1.1 200 OK\r\n", "Content-Type: TEXT/plain\r\n",
+						{ "Content-Length:", testResponse.length() }, testResponse};
+					response = httpResponse.GetResponse();
+				}
+				else if (httpRequest.path == "/echo/abc")
+				{
+					response = httpResponse.GetResponse();
 
-				std::string userAgent = httpRequest.headers["User-Agent"];
-				response = "HTTP/1.1 200 OK\r\nContent-Type: TEXT/plain\r\nContent-Length:"
-					+ std::to_string(userAgent.size()) + "\r\n\r\n" + userAgent;
+				}
+				else if (httpRequest.path == "/user-agent")
+				{
 
-
+					std::string userAgent = httpRequest.headers["User-Agent"];
+					response = "HTTP/1.1 200 OK\r\nContent-Type: TEXT/plain\r\nContent-Length:"
+						+ std::to_string(userAgent.size()) + "\r\n\r\n" + userAgent;
+				}
+				else
+				{
+					response = "HTTP/1.1 404 Not Found\n";
+				}
 			}
 			else
 			{
-				response = "HTTP/1.1 404 Not Found\n";
+				httpResponse = { "HTTP/1.1 405 Method Not Allowed", "text/plain", {}, "Method Not Allowed" };
+
 			}
+			
 		}
 		catch(const std::out_of_range& e)
 		{

@@ -3,4 +3,6 @@ Debug/
 *.vcxproj
 *.sln
 *.filters
-*.user
+http-server-cpp.vcxproj.filters
+http-server-cpp.vcxproj.user
+
