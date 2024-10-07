@@ -8,6 +8,8 @@
 #include <map>
 #include <array>
 #include <algorithm>
+#include <filesystem>
+#include <fstream>
 #include <assert.h>
 #include "requestparse.h"
 #pragma comment(lib,"ws2_32.lib")
@@ -54,18 +56,6 @@ public:
 		//key: value
 		//第一个元素是get 路径 然后协议所以不需要
 		this->headers = std::move(getHeaders(tokens));
-		/*for (size_t i = 1; i < tokens.size(); i++)
-		{
-			std::vector<std::string> header = SplitMessage(tokens[i], ": ");
-			if (header.size() == 2)
-			{
-				headers[header[0]] = header[1];
-			}
-			else
-			{
-                std::clog << "Header is not valid" << std::endl;
-			}
-		}*/
 		std::vector<std::string> bodyTokens = SplitMessage(path, "/");
 		// /echo/abc  只需要abc
 		body = bodyTokens.back();
@@ -74,27 +64,23 @@ public:
 private:
 	std::map<std::string, std::string> getHeaders(const std::vector<std::string>& headerlines)
 	{
+		//目前处理按postman第一个用别的存储了后续的只能处理:
 		std::map<std::string, std::string> headers;
-		for (const auto& line : headerlines)
+		for (size_t i = 1; i < headerlines.size(); i++)
 		{
-			if (line.empty())
-			{
-				std::clog << "请求头内容为空" << std::endl;
-				break;
-			}
-			size_t delimPos = line.find(": ");
+			size_t delimPos = headerlines[i].find(": ");
 			if (delimPos != std::string::npos)
 			{
-				std::string key = line.substr(0, delimPos);
+				std::string key = headerlines[i].substr(0, delimPos);
 				key.erase(0, key.find_first_not_of(" \t\r\n"));
 				key.erase(key.find_last_not_of(" \t\r\n") + 1);
 				//Host: localhost:4221
-				std::string value = line.substr(delimPos + 2);
-                value.erase(0, value.find_first_not_of(" \t\r\n"));
-                value.erase(value.find_last_not_of(" \t\r\n") + 1);
+				std::string value = headerlines[i].substr(delimPos + 2);
+				value.erase(0, value.find_first_not_of(" \t\r\n"));
+				value.erase(value.find_last_not_of(" \t\r\n") + 1);
 				if (!value.empty() && value.back() == '\n')
 				{
-                    value.pop_back();
+					value.pop_back();
 				}
 
 				if (!value.empty() && value.back() == '\r')
@@ -105,12 +91,15 @@ private:
 			}
 			else
 			{
-				std::cout << "请求头内容格式可能不正确: " << line << std::endl;
+                std::cerr << "请求头内容存在不是 key:value这种方式将error:error存入头内容中" << std::endl;
+				headers["error"] = "error";
 			}
 		}
+		
+		
 		return headers;
 	}
-
+	
 
 	std::tuple<std::string, std::vector<std::string>> getPath(const std::string& request) override
 	{
@@ -215,18 +204,12 @@ bool ConductMsg(SOCKET clientFd)
 
 		std::string response;
 
-		std::string testResponse("1111");
+		std::string testResponse("hello");
 		//std::string t2 = httpRequest.body;
 		HttpResponse httpResponse{ "HTTP/1.1 200 OK\r\n", "Content-Type: TEXT/plain\r\n",
 			{"Content-Length:", testResponse.length()}, testResponse };
 
-		/*
-		First request 第一个请求
-The first request will ask for a file that exists in the files directory:
-第一个请求将请求存在于 files 目录中的文件：
-
-$ echo -n 'Hello, World!' > /tmp/foo
-$ curl -i http://localhost:4221/files/foo*/
+		
 		try
 		{
 			if (httpRequest.method == "GET")
@@ -251,14 +234,46 @@ $ curl -i http://localhost:4221/files/foo*/
 					response = "HTTP/1.1 200 OK\r\nContent-Type: TEXT/plain\r\nContent-Length:"
 						+ std::to_string(userAgent.size()) + "\r\n\r\n" + userAgent;
 				}
+				else if (httpRequest.path.starts_with("/files/") || httpRequest.path.starts_with("/files"))
+				{
+					/*
+					$ echo -n 'Hello, World!' > /tmp/foo
+					$ curl -i http://localhost:4221/files/foo */
+					std::string fileName = httpRequest.path.substr(7);
+					std::filesystem::path filePath(fileName);
+					//判断文件是否有扩展名c++17
+					if (filePath.has_extension())
+						std::cout << "Ok have extension" << std::endl;
+					else
+						fileName += ".txt";
+
+					std::string currentPath = std::filesystem::current_path().string();
+					std::string tempPath = "/tmp/";
+					std::string path = currentPath + tempPath + fileName;
+					std::ifstream ifs(path, std::ios::binary);//不希望自动添加换行符
+					if (ifs.good())
+					{
+						std::stringstream content;
+						content << ifs.rdbuf();
+						httpResponse = {"HTTP/1.1 200 OK\r\n", "Content - Type:application/octet-stream\r\n",
+							{"Content-Length:", content.str().length()},content.str()};
+						response = httpResponse.GetResponse();
+					}
+					else
+					{
+						response = "HTTP/1.1 404 Not Found\r\n";
+					}
+				}
 				else
 				{
-					response = "HTTP/1.1 404 Not Found\n";
+					response = "HTTP/1.1 404 Not Found\r\n";
 				}
 			}
 			else
 			{
-				httpResponse = { "HTTP/1.1 405 Method Not Allowed", "text/plain", {}, "Method Not Allowed" };
+				httpResponse = { "HTTP/1.1 405 Method Not Allowed\r\n", 
+					"Content-Type: TEXT/plain\r\n", {"Content-Length:", 0}, "Method Not Allowed" };
+                response = httpResponse.GetResponse();
 
 			}
 
@@ -350,9 +365,10 @@ int main(int argc, char* argv[])
 	std::cout << std::unitbuf;
 	std::cerr << std::unitbuf;
 	// ./your_program.sh --directory /tmp/
-	std::string dir;
-	if (argc == 3 && strcmp(argv[1], "--directory") == 0)
-		dir = argv[2];
+	//std::string dir{};
+	////测试
+	//if (argc == 3 && strcmp(argv[1], "--directory") == 0)
+	//	dir = argv[2];
 
 	
 	WSADATA data{};
@@ -400,6 +416,7 @@ int main(int argc, char* argv[])
 
 	}
 	// Accept a client connection
+	//如果需要获取客户端信息记得
 	/*sockaddr_in clientAddr{};
 	int clientAddrLen = sizeof(clientAddr);
 	std::cout << "Waiting for a client to connect...\n";
