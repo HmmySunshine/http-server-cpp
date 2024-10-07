@@ -6,6 +6,9 @@
 #include <vector>
 #include <sstream>
 #include <map>
+#include <array>
+#include <algorithm>
+#include <assert.h>
 #include "requestparse.h"
 #pragma comment(lib,"ws2_32.lib")
 
@@ -77,14 +80,18 @@ private:
 			if (line.empty())
 			{
 				std::clog << "请求头内容为空" << std::endl;
-				continue;
+				break;
 			}
 			size_t delimPos = line.find(": ");
 			if (delimPos != std::string::npos)
 			{
 				std::string key = line.substr(0, delimPos);
+				key.erase(0, key.find_first_not_of(" \t\r\n"));
+				key.erase(key.find_last_not_of(" \t\r\n") + 1);
 				//Host: localhost:4221
 				std::string value = line.substr(delimPos + 2);
+                value.erase(0, value.find_first_not_of(" \t\r\n"));
+                value.erase(value.find_last_not_of(" \t\r\n") + 1);
 				if (!value.empty() && value.back() == '\n')
 				{
                     value.pop_back();
@@ -98,10 +105,7 @@ private:
 			}
 			else
 			{
-				if (!line.empty())
-				{
-					std::cout << "请求头内容可能是空内容" << std::endl;
-				}
+				std::cout << "请求头内容格式可能不正确: " << line << std::endl;
 			}
 		}
 		return headers;
@@ -169,12 +173,12 @@ public:
 public:
 	std::string GetResponse()
 	{
-		auto[ctlString, contentLength] = getContentLength();
+		auto [ctlString, contentLength] = getContentLength();
 		return status + contentType + ctlString + std::to_string(contentLength) + "\r\n\r\n" + body;
 
 	}
 private:
-	std::tuple<std::string, size_t> getContentLength() 
+	std::tuple<std::string, size_t> getContentLength()
 	{
 		return contentLength;
 	}
@@ -182,6 +186,162 @@ private:
 };
 
 
+bool ConductMsg(SOCKET clientFd)
+{
+	//缓冲区
+	std::string clientMessage(1024, '\0');
+	int brecvd = recv(clientFd, const_cast<char*>(clientMessage.c_str()), clientMessage.size(), 0);
+
+	if (brecvd < 0)
+	{
+		std::cerr << "Failed to receive data from client" << WSAGetLastError() << "\n";
+		return false;
+	}
+	else if (brecvd == 0)
+	{
+		std::clog << "no bytes read or Client disconnected" << std::endl;
+		return false;
+	}
+	else
+	{
+		//调整字符串大小
+		clientMessage.resize(brecvd);
+
+		std::clog << "Client Message (length: " << clientMessage.size() << ")" << std::endl;
+		std::clog << clientMessage << std::endl;
+		//结构化绑定
+		HttpRequest httpRequest;
+		httpRequest.InitHttpRequest(clientMessage);
+
+		std::string response;
+
+		std::string testResponse("1111");
+		//std::string t2 = httpRequest.body;
+		HttpResponse httpResponse{ "HTTP/1.1 200 OK\r\n", "Content-Type: TEXT/plain\r\n",
+			{"Content-Length:", testResponse.length()}, testResponse };
+
+		/*
+		First request 第一个请求
+The first request will ask for a file that exists in the files directory:
+第一个请求将请求存在于 files 目录中的文件：
+
+$ echo -n 'Hello, World!' > /tmp/foo
+$ curl -i http://localhost:4221/files/foo*/
+		try
+		{
+			if (httpRequest.method == "GET")
+			{
+				if (httpRequest.path == "/")
+				{
+					httpResponse = { "HTTP/1.1 200 OK\r\n", "Content-Type: TEXT/plain\r\n",
+						{ "Content-Length:", testResponse.length() }, testResponse };
+					response = httpResponse.GetResponse();
+				}
+				else if (httpRequest.path.starts_with("/echo"))
+				{
+					httpResponse = { "HTTP/1.1 200 OK\r\n", "Content-Type: TEXT/plain\r\n",
+						{ "Content-Length:", httpRequest.body.length()}, httpRequest.body};
+					response = httpResponse.GetResponse();
+
+				}
+				else if (httpRequest.path == "/user-agent")
+				{
+
+					std::string userAgent = httpRequest.headers["User-Agent"];
+					response = "HTTP/1.1 200 OK\r\nContent-Type: TEXT/plain\r\nContent-Length:"
+						+ std::to_string(userAgent.size()) + "\r\n\r\n" + userAgent;
+				}
+				else
+				{
+					response = "HTTP/1.1 404 Not Found\n";
+				}
+			}
+			else
+			{
+				httpResponse = { "HTTP/1.1 405 Method Not Allowed", "text/plain", {}, "Method Not Allowed" };
+
+			}
+
+		}
+		catch (const std::out_of_range& e)
+		{
+
+			std::cout << __LINE__ << e.what() << std::endl;
+		}
+		if (send(clientFd, response.c_str(), response.size(), 0) == SOCKET_ERROR)
+		{
+			std::cerr << "Failed to send data to client" << WSAGetLastError() << "\n";
+			return false;
+		}
+	}
+	
+
+	return true;
+}
+
+bool CoreFunc(SOCKET serverFd, std::vector<SOCKET>& clntFds)
+{
+	assert(serverFd != INVALID_SOCKET);
+	fd_set fdReads{};
+	FD_ZERO(&fdReads);
+	FD_SET(serverFd, &fdReads);
+	timeval timeout{ 10, 0 };
+	//std::vector<SOCKET> clntFds{};
+	while (1)
+	{
+		std::cout << "Waiting for a client to connect...\n";
+		FD_ZERO(&fdReads);
+		FD_SET(serverFd, &fdReads);
+		for (auto& clntFd : clntFds)
+		{
+			FD_SET(clntFd, &fdReads);
+		}
+		int readyRead = select(0, &fdReads, nullptr, nullptr, &timeout);
+		if (readyRead > 0)
+		{
+			for (uint16_t i = 0; i < fdReads.fd_count; ++i)
+			{
+				if (fdReads.fd_array[i] == serverFd)
+				{
+					/*struct sockaddr_in clientAddr {};
+                    int clientAddrLen = sizeof(clientAddr);*/
+					SOCKET newClntFd = accept(serverFd, nullptr, nullptr);
+					if (newClntFd == INVALID_SOCKET)
+					{
+						std::cerr << "Failed to accept new client connection error num:" << WSAGetLastError() << std::endl;
+						return false;
+					}
+					FD_SET(newClntFd, &fdReads);//将新的客户端套接字添加到文件描述符集合中
+					clntFds.push_back(newClntFd);
+				}
+				else
+				{
+					if (!ConductMsg(fdReads.fd_array[i]))
+					{
+						FD_CLR(fdReads.fd_array[i], &fdReads);
+						clntFds.erase(std::remove(clntFds.begin(), clntFds.end(), fdReads.fd_array[i]), clntFds.end());
+                        closesocket(fdReads.fd_array[i]);
+						return false;
+					}
+					
+					
+				}
+			}
+		}
+		else if (readyRead == 0)
+		{
+			std::cout << "timeout or client disconnected" << std::endl;
+			continue;
+		}
+		else
+		{
+			std::cerr << "select failed bad num = " << WSAGetLastError() << std::endl;
+			return false;
+		}
+	}
+
+	return true;
+}
 
 
 int main(int argc, char* argv[])
@@ -189,7 +349,12 @@ int main(int argc, char* argv[])
 	//刷新缓冲区
 	std::cout << std::unitbuf;
 	std::cerr << std::unitbuf;
-    // Initialize Winsock
+	// ./your_program.sh --directory /tmp/
+	std::string dir;
+	if (argc == 3 && strcmp(argv[1], "--directory") == 0)
+		dir = argv[2];
+
+	
 	WSADATA data{};
 	
 	if (WSAStartup(MAKEWORD(2, 2), &data) != 0)
@@ -235,7 +400,7 @@ int main(int argc, char* argv[])
 
 	}
 	// Accept a client connection
-	sockaddr_in clientAddr{};
+	/*sockaddr_in clientAddr{};
 	int clientAddrLen = sizeof(clientAddr);
 	std::cout << "Waiting for a client to connect...\n";
 	SOCKET clientFd = accept(serverFd, (sockaddr*)&clientAddr, &clientAddrLen);
@@ -244,96 +409,30 @@ int main(int argc, char* argv[])
 		std::cerr << "Failed to accept client connection\n";
 		closesocket(serverFd);
 		return 1;
-	}
+	}*/
 	//std::string message = "HTTP/1.1 200 OK\r\n\r\n";
 	//GET /index.html HTTP/1.1\r\nHost: localhost:4221\r\nUser-Agent: curl/7.64.1\r\nAccept: */*\r\n\r\n
-	std::string clientMessage(1024, '\0');
-	int brecvd = recv(clientFd, const_cast<char*>(clientMessage.c_str()), clientMessage.size(), 0);
-	
-	if (brecvd < 0)
+	std::vector<SOCKET> clntFds;
+	if (!CoreFunc(serverFd, clntFds))
 	{
-		std::cerr << "Failed to receive data from client" << WSAGetLastError() << "\n";
+		
 		closesocket(serverFd);
-		closesocket(clientFd);
-		WSACleanup();
+		for (const auto& clntFd : clntFds)
+		{
+			closesocket(clntFd);
+		}
+		clntFds.clear();
+        WSACleanup();
 		return 1;
-	} 
-	else if (brecvd == 0)
-	{
-		std::clog << "no bytes read" << std::endl;
-	}
-	else
-	{
-		//调整字符串大小
-        clientMessage.resize(brecvd);
-
-		std::clog << "Client Message (length: " << clientMessage.size() << ")" << std::endl;
-		std::clog << clientMessage << std::endl;
-		//结构化绑定
-		HttpRequest httpRequest;
-		httpRequest.InitHttpRequest(clientMessage);
-
-		std::string response;
-
-		std::string testResponse("\r\n\r\n1");
-		//std::string t2 = httpRequest.body;
-		HttpResponse httpResponse{ "HTTP/1.1 200 OK\r\n", "Content-Type: TEXT/plain\r\n",
-			{"Content-Length:", testResponse.length()}, testResponse};
-
-
-		try
-		{
-			if (httpRequest.method == "GET")
-			{
-				if (httpRequest.path == "/")
-				{
-					httpResponse = { "HTTP/1.1 200 OK\r\n", "Content-Type: TEXT/plain\r\n",
-						{ "Content-Length:", testResponse.length() }, testResponse};
-					response = httpResponse.GetResponse();
-				}
-				else if (httpRequest.path == "/echo/abc")
-				{
-					response = httpResponse.GetResponse();
-
-				}
-				else if (httpRequest.path == "/user-agent")
-				{
-
-					std::string userAgent = httpRequest.headers["User-Agent"];
-					response = "HTTP/1.1 200 OK\r\nContent-Type: TEXT/plain\r\nContent-Length:"
-						+ std::to_string(userAgent.size()) + "\r\n\r\n" + userAgent;
-				}
-				else
-				{
-					response = "HTTP/1.1 404 Not Found\n";
-				}
-			}
-			else
-			{
-				httpResponse = { "HTTP/1.1 405 Method Not Allowed", "text/plain", {}, "Method Not Allowed" };
-
-			}
-			
-		}
-		catch(const std::out_of_range& e)
-		{
-			
-			std::cout << __LINE__  << e.what() << std::endl;
-		}
-
-		if (send(clientFd, response.c_str(), response.size(), 0) == SOCKET_ERROR)
-		{
-			std::cerr << "Failed to send data to client\n";
-			closesocket(serverFd);
-			closesocket(clientFd);
-			WSACleanup();
-			return 1;
-		}
 	}
 	
 
     closesocket(serverFd);
-    closesocket(clientFd);
+    //closesocket(clientFd);
+	for (const auto& clntFd : clntFds)
+	{
+        closesocket(clntFd);
+	}
 
 	WSACleanup();
 	return 0;
