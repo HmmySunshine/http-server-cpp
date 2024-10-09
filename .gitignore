@@ -3,6 +3,9 @@ Debug/
 *.vcxproj
 *.sln
 *.filters
+http-server-cpp/*.vcxproj.filters
+http-server-cpp/*.vcxproj.user
 http-server-cpp/*.vcxproj
-http-server-cpp/*.filters
 TestSomthing/
+http-server-cpp/x64
+http-server-cpp/Debug
